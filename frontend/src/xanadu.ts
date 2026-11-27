@@ -379,6 +379,206 @@ export async function editDoc(
   return { store: updated, version: next };
 }
 
+/* --------------------------------------------------- markdown importer */
+
+const WIKILINK_RE = /(!?)\[\[([^\]|#]+?)(?:#([^\]|]+?))?(?:\|([^\]]+?))?\]\]/g;
+
+export interface ImportFile {
+  name: string;
+  content: string;
+}
+
+export interface ImportResult {
+  store: XanaduStore;
+  importedDocIds: string[];
+  linkCount: number;
+}
+
+interface TextRange {
+  start: number;
+  end: number;
+}
+
+interface ResolvedDoc {
+  docId: string;
+  content: string;
+  version: number;
+}
+
+const EXCERPT_LIMIT = 400;
+
+function stripExtension(name: string): string {
+  return name.replace(/^.*[\\/]/, "").replace(/\.(md|markdown|txt|text)$/i, "").trim();
+}
+
+function slugify(title: string): string {
+  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return slug || "note";
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function uniqueDocId(store: XanaduStore, title: string): string {
+  const base = `doc_${slugify(title)}`;
+  let candidate = base;
+  let suffix = 2;
+  while (store.documents.some((doc) => doc.docId === candidate)) candidate = `${base}_${suffix++}`;
+  return candidate;
+}
+
+function trimRange(content: string, start: number, end: number): TextRange {
+  let left = Math.max(0, Math.min(start, content.length));
+  let right = Math.max(left, Math.min(end, content.length));
+  while (left < right && /\s/.test(content[left])) left += 1;
+  while (right > left && /\s/.test(content[right - 1])) right -= 1;
+  return { start: left, end: right };
+}
+
+/** Keep an excerpt to a sentence boundary when possible (spans stay verbatim). */
+function capRange(content: string, range: TextRange, limit = EXCERPT_LIMIT): TextRange {
+  if (range.end - range.start <= limit) return range;
+  const slice = content.slice(range.start, range.start + limit);
+  const boundary = Math.max(
+    slice.lastIndexOf(". "),
+    slice.lastIndexOf(".\n"),
+    slice.lastIndexOf("! "),
+    slice.lastIndexOf("? "),
+  );
+  const end = boundary > 80 ? range.start + boundary + 1 : range.start + limit;
+  return trimRange(content, range.start, end);
+}
+
+/** First non-empty paragraph at or after `from`. */
+function firstParagraph(content: string, from = 0): TextRange | null {
+  const match = /\S[^\n]*(?:\n(?!\s*\n)\S[^\n]*)*/.exec(content.slice(from));
+  if (!match) return null;
+  const start = from + match.index;
+  return capRange(content, trimRange(content, start, start + match[0].length));
+}
+
+/** Obsidian `#^block-id` -> the prose on that line (marker excluded when possible). */
+function blockRange(content: string, blockId: string): TextRange | null {
+  const marker = `^${blockId}`;
+  const index = content.indexOf(marker);
+  if (index < 0) return null;
+  const lineStart = content.lastIndexOf("\n", index) + 1;
+  const before = trimRange(content, lineStart, index);
+  if (before.end > before.start) return capRange(content, before);
+  const lineBreak = content.indexOf("\n", index);
+  const lineEnd = lineBreak < 0 ? content.length : lineBreak;
+  const after = trimRange(content, index + marker.length, lineEnd);
+  if (after.end > after.start) return capRange(content, after);
+  return capRange(content, trimRange(content, lineStart, lineEnd));
+}
+
+/** `[[Note#Heading]]` -> first paragraph under that heading. */
+function headingRange(content: string, heading: string): TextRange | null {
+  const pattern = new RegExp(`^#{1,6}\\s*${escapeRegExp(heading)}\\s*$`, "im");
+  const match = pattern.exec(content);
+  if (!match) return null;
+  return firstParagraph(content, match.index + match[0].length);
+}
+
+/**
+ * Import Markdown files as immutable v1 documents and turn every wikilink
+ * (`[[Note]]`, `![[Embed]]`, `[[Note#Heading]]`, `[[Note#^block]]`) into a
+ * span link, mirroring quartz's `wikilinkRegex` (AGENTS.md bonus feature).
+ * Files whose targets are not being imported are skipped rather than guessed.
+ */
+export async function importMarkdownFiles(
+  store: XanaduStore,
+  files: ImportFile[],
+): Promise<ImportResult> {
+  let next = store;
+  const imported: { docId: string; title: string; content: string }[] = [];
+
+  for (const file of files) {
+    const title = stripExtension(file.name) || `Imported note ${imported.length + 1}`;
+    const content = (file.content ?? "").trim();
+    if (!content) continue;
+    const docId = uniqueDocId(next, title);
+    const createdAt = new Date().toISOString();
+    next = {
+      ...next,
+      documents: [...next.documents, { docId, title, latestVersion: 1, createdAt }],
+      documentVersions: [
+        ...next.documentVersions,
+        {
+          docVersionId: `${docId}@v1`,
+          docId,
+          version: 1,
+          content,
+          contentHash: await sha256Hex(content),
+          parentVersionId: null,
+          createdAt,
+        },
+      ],
+    };
+    imported.push({ docId, title, content });
+  }
+
+  if (imported.length === 0) return { store, importedDocIds: [], linkCount: 0 };
+
+  const index = new Map<string, ResolvedDoc>();
+  for (const doc of next.documents) {
+    const latest = getLatestVersion(next, doc.docId);
+    if (!latest) continue;
+    const entry: ResolvedDoc = { docId: doc.docId, content: latest.content, version: latest.version };
+    index.set(doc.title.trim().toLowerCase(), entry);
+    index.set(doc.docId.toLowerCase(), entry);
+    index.set(`doc_${slugify(doc.title)}`, entry);
+  }
+  const resolve = (raw: string): ResolvedDoc | null => {
+    const key = raw.trim().toLowerCase();
+    return index.get(key) ?? index.get(`doc_${slugify(key)}`) ?? null;
+  };
+
+  const links: SpanLink[] = [];
+  for (const source of imported) {
+    WIKILINK_RE.lastIndex = 0;
+    let match: RegExpExecArray | null = WIKILINK_RE.exec(source.content);
+    while (match) {
+      const token = match[0];
+      const embed = match[1] === "!";
+      const fragment = (match[3] ?? "").trim();
+      const target = resolve(match[2] ?? "");
+      if (target) {
+        const range = fragment.startsWith("^")
+          ? blockRange(target.content, fragment.slice(1))
+          : fragment
+            ? headingRange(target.content, fragment)
+            : null;
+        const chosen = range ?? firstParagraph(target.content);
+        if (chosen && chosen.end > chosen.start) {
+          const span = makeSpan(target.docId, target.version, target.content, chosen.start, chosen.end);
+          links.push({
+            linkId: `link_${source.docId}_${match.index}_${target.docId}`,
+            linkType: embed ? "transclusion" : fragment.startsWith("^") ? "block_ref" : "wikilink",
+            fromDocVersionId: `${source.docId}@v1`,
+            fromStart: match.index,
+            fromEnd: match.index + token.length,
+            toDocVersionId: span.docVersionId,
+            toStart: span.start,
+            toEnd: span.end,
+            exactQuote: span.exact,
+            prefix: span.prefix,
+            suffix: span.suffix,
+          });
+        }
+      }
+      match = WIKILINK_RE.exec(source.content);
+    }
+  }
+
+  const updated: XanaduStore = links.length
+    ? { ...next, spanLinks: [...next.spanLinks, ...links] }
+    : next;
+  saveStore(updated);
+  return { store: updated, importedDocIds: imported.map((doc) => doc.docId), linkCount: links.length };
+}
+
 export function saveAnswer(store: XanaduStore, answer: AIAnswerRecord): XanaduStore {
   const updated: XanaduStore = { ...store, aiAnswers: [...store.aiAnswers, answer] };
   saveStore(updated);

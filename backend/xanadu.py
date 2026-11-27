@@ -67,6 +67,12 @@ def split_sentences(text: str) -> List[str]:
     return [chunk.strip() for chunk in re.split(r"(?<=[.!?])\s+", text or "") if chunk.strip()]
 
 
+def prose_text(text: str) -> str:
+    """Drop Markdown heading lines so cited spans quote prose, not `##` noise."""
+    lines = [line for line in (text or "").split("\n") if not re.match(r"^\s{0,3}#{1,6}\s", line)]
+    return "\n".join(lines)
+
+
 def content_words(text: str) -> set:
     """Lowercased, stop-word-free content words (>= 3 chars)."""
     words = re.findall(r"[a-z0-9']+", (text or "").lower())
@@ -124,7 +130,7 @@ def _own_spans(doc: Dict[str, Any], question: str, limit: int = 2) -> List[Dict[
     terms = content_words(question)
     candidates: List[Tuple[float, int, int]] = []
     cursor = 0
-    for sentence in split_sentences(doc["content"]):
+    for sentence in split_sentences(prose_text(doc["content"])):
         start = doc["content"].find(sentence, cursor)
         if start < 0:
             start = doc["content"].find(sentence)

@@ -80,6 +80,12 @@
       }
       .btn-primary:hover:not(:disabled) { background: linear-gradient(180deg, #31809f, #226a88); }
       .btn-sm { padding: 4px 9px; font-size: 11.5px; border-radius: 7px; }
+      .import-btn { display: inline-flex; align-items: center; cursor: pointer; }
+      .import-btn input { display: none; }
+      .notice {
+        padding: 8px 20px; border-bottom: 1px solid var(--line); font-size: 12px;
+        color: #bde4f5; background: rgba(125, 211, 252, 0.07);
+      }
 
       .pane-grid {
         flex: 1; display: grid; grid-template-columns: 320px minmax(0, 1fr) minmax(0, 1fr);
@@ -220,7 +226,7 @@
         .pane-body { overflow: visible; }
         /* stacked panes make long cross-pane bridges noisy; chips still link */
         .span-bridge { display: none; }
-        .topbar, .question-row { padding-left: 12px; padding-right: 12px; }
+        .topbar, .question-row, .notice { padding-left: 12px; padding-right: 12px; }
         .diff-grid { grid-template-columns: 1fr; }
       }
     </style>

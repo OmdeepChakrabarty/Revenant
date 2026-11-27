@@ -15,6 +15,7 @@ import {
   buildGraph,
   DEMO_ANSWER,
   editDoc,
+  importMarkdownFiles,
   loadOrSeedStore,
   refreshAnswerStaleness,
   saveAnswer,
@@ -39,6 +40,8 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [hop, setHop] = useState<TraversalHop | null>(null);
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const timers = useRef<number[]>([]);
 
   const clearTimers = useCallback(() => {
@@ -111,6 +114,37 @@ function App() {
     }
   }, [loading, question, replayDemo, store]);
 
+  const importFiles = useCallback(
+    async (files: File[]) => {
+      if (!store || files.length === 0) return;
+      setImporting(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const payload = await Promise.all(
+          files.map(async (file) => ({ name: file.name, content: await file.text() })),
+        );
+        const result = await importMarkdownFiles(store, payload);
+        if (result.importedDocIds.length === 0) {
+          setNotice("Those files had no text in them — nothing was imported.");
+          return;
+        }
+        setStore(result.store);
+        setActiveDocId(result.importedDocIds[0]);
+        const docs = `${result.importedDocIds.length} document${result.importedDocIds.length === 1 ? "" : "s"}`;
+        const links = result.linkCount > 0
+          ? ` and ${result.linkCount} span link${result.linkCount === 1 ? "" : "s"}`
+          : "";
+        setNotice(`Imported ${docs}${links}. Ask a question to test them.`);
+      } catch (caught) {
+        setError(`Import failed: ${errorMessage(caught)}`);
+      } finally {
+        setImporting(false);
+      }
+    },
+    [store],
+  );
+
   const saveDocument = useCallback(
     async (docId: string, content: string) => {
       if (!store) return;
@@ -162,6 +196,23 @@ function App() {
           <p>Immutable I-Space · span-addressed citations · ghost-claim verification</p>
         </div>
         <div className="topbar-spacer" />
+        <label
+          className="btn btn-sm import-btn"
+          title="Import Markdown files. [[wikilinks]] and ![[embeds]] become span links."
+        >
+          {importing ? "Importing…" : "Import Markdown"}
+          <input
+            type="file"
+            multiple
+            accept=".md,.markdown,.txt,text/markdown,text/plain"
+            disabled={importing}
+            onChange={(event) => {
+              const files = Array.from(event.currentTarget.files ?? []);
+              event.currentTarget.value = "";
+              void importFiles(files);
+            }}
+          />
+        </label>
         <span className="badge" title="Every edit appends a new immutable version">
           {store.documents.length} docs · {store.documentVersions.length} versions · {store.spanLinks.length} spans
         </span>
@@ -184,6 +235,8 @@ function App() {
           {loading ? "Tracing…" : "Ask the archive"}
         </button>
       </form>
+
+      {notice && <div className="notice">{notice}</div>}
 
       <div className="pane-grid">
         <Xwrapper>
