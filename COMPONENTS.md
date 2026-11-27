@@ -24,157 +24,154 @@
 
 ---
 
-## A. Best Stack Combination
+## A. Stack Actually Used
 
-| Layer / Feature | Selected Component | Language / Runtime | License | How Spans Are Represented & Connected |
-| :--- | :--- | :--- | :--- | :--- |
-| **Feature 1: Stale-Answer Detection** | [`nonoroazoro/diff-match-patch-typescript`](https://github.com/nonoroazoro/diff-match-patch-typescript) + W3C `TextQuoteSelector` pattern from [`hypothesis/client`](https://github.com/hypothesis/client) | TypeScript (Frontend & Node/Bun API) | Apache-2.0 & BSD-2-Clause | Immutable document versions (`docId@v`) store exact `[startOffset, endOffset)` character intervals plus `{exact, prefix, suffix}` selectors. On edit (`v` -> `v+1`), `diff_main` + `diff_xIndex` remap `[start, end)` to the new version and flag any answer citation whose slice mutated as `"outdated"`. |
-| **Feature 2: Ghost Claims (Unsourced Claims)** | [`KRLabsOrg/LettuceDetect`](https://github.com/KRLabsOrg/LettuceDetect) + citation prompt pattern from [`anthropics/claude-cookbooks`](https://github.com/anthropics/claude-cookbooks) | Python (FastAPI Backend, CPU-friendly `TinyLettuce` / `ModernBERT`) | MIT | `HallucinationDetector.predict(..., output_format="spans")` returns character spans `[{start, end, confidence, text}]` in the AI answer that lack support in the cited source spans. Any answer sentence overlapping an unsupported span (or missing a `<cite>` tag) is styled faded and badged `"unsupported"`. |
-| **Feature 4: Animated Link Traversal View** | [`vasturiano/react-force-graph`](https://github.com/vasturiano/react-force-graph) (macro graph) + [`Eliav2/react-xarrows`](https://github.com/Eliav2/react-xarrows) (micro span bridge) | TypeScript / React | MIT | `ForceGraph2D` renders document nodes and transclusion links, firing `emitParticle(link)` as the AI streams retrieval events. Side-by-side transcluded `<mark id="span-...">` DOM elements are connected by animated `<Xarrow>` SVG bridges. |
-| **Bonus: Obsidian Vault Importer** | [`jackyzha0/quartz`](https://github.com/jackyzha0/quartz) (`ofm.ts` / `links.ts` patterns) | TypeScript | MIT | Parses `[[Note#Heading]]`, `[[Note#^block-id]]`, and `![[Embed]]` syntax into explicit character-range transclusion links in the immutable store. |
+Everything below is installed and imported by the shipped code. The app is three
+Python files, four TypeScript/React files, one `index.html` and one
+`requirements.txt`; the backend is stateless and owns no database.
 
-**Why They Fit Together:**
-- **Unified Coordinate System:** Every component operates on half-open UTF-16/UTF-8 character offsets `[start, end)` pinned to an immutable `docVersionId`.
-- **Zero Paid API Dependency:** `diff-match-patch-typescript`, `react-force-graph`, and `react-xarrows` run 100% client-side in the browser; `LettuceDetect` runs locally on CPU/free-tier Colab/Spaces via `TinyLettuce` (17M–68M parameters) or `ModernBERT-base` with a built-in FastAPI server (`lettucedetect_api`).
+| Layer / Feature | Component | License | Exact Integration Point |
+| :--- | :--- | :--- | :--- |
+| **Feature 1: Stale-Answer Detection** | [`nonoroazoro/diff-match-patch-typescript`](https://github.com/nonoroazoro/diff-match-patch-typescript) | Apache-2.0 | `frontend/src/xanadu.ts` → `checkSpanStaleness()`, `diffSegments()`; `DiffMatchPatch.diff_main` / `diff_xIndex` remap `[start, end)` onto the newest version. |
+| **Feature 1 (fallback)** | [`hypothesis/client`](https://github.com/hypothesis/client) `TextQuoteSelector` pattern (**adapted algorithm, no dependency**) | BSD-2-Clause | `frontend/src/xanadu.ts` → `findQuoteCandidate()` / `contextScore()`; a unique occurrence or the best-scoring 32-char prefix/suffix match re-anchors the quote. |
+| **Feature 2: Ghost Claims** | [`anthropics/claude-cookbooks`](https://github.com/anthropics/claude-cookbooks) citation prompt (**adapted prompt, no dependency**) | MIT | `backend/provenance.py` → `build_prompt()` wraps spans as `[SPAN id]…[/SPAN]` and demands `<cite span="…">` tags; `verify_answer()` performs the deterministic `GHOST_MODE=simple` check (`MIN_OVERLAP = 0.3`). |
+| **Feature 4: Macro graph** | [`vasturiano/react-force-graph`](https://github.com/vasturiano/react-force-graph) (`react-force-graph-2d`) | MIT | `frontend/src/GraphView.tsx` → `ForceGraph2D`, `nodeCanvasObject` halo, `emitParticle(link)` per SSE hop. |
+| **Feature 4: Micro bridges** | [`Eliav2/react-xarrows`](https://github.com/Eliav2/react-xarrows) | MIT | `frontend/src/ReaderAndProof.tsx` → `SpanBridges` (`<Xarrow animateDrawing={0.3}>`) plus `useXarrow()` inside a `requestAnimationFrame`-throttled capture-phase scroll listener. |
+| **UI runtime** | [`facebook/react`](https://github.com/facebook/react) / `react-dom` | MIT | `frontend/src/App.tsx` mounts with `createRoot`. |
+| **Build tooling** | [`vitejs/vite`](https://github.com/vitejs/vite), `@vitejs/plugin-react`, `typescript`, `@types/react`, `@types/react-dom` | MIT / MIT / Apache-2.0 / MIT / MIT | `frontend/vite.config.ts`, `frontend/tsconfig.json`, `npm run build`. |
+| **API runtime** | [`fastapi/fastapi`](https://github.com/fastapi/fastapi), `pydantic`, `httpx`, `uvicorn` | MIT / MIT / BSD-3-Clause / BSD-3-Clause | `backend/app.py` (two routes), `backend/provenance.py` (`httpx.AsyncClient` REST call), `backend/requirements.txt`. |
+
+### Deliberately not used
+These appeared in earlier drafts and were removed because they are heavy,
+copyleft, or simply unnecessary:
+
+- `lettucedetect` / `torch` / `transformers` — multi-gigabyte Vercel bundle; the
+  deterministic verifier in `provenance.py` replaces it.
+- `yjs` — CRDT anchors are unnecessary once versions are immutable and spans are
+  version-pinned.
+- `sigma.js` — `react-force-graph-2d` already covers the canvas rendering.
+- `jackyzha0/quartz` importer — a bonus feature, intentionally out of scope.
+- `python-dotenv`, `python-multipart`, `pytest`, `diff-match-patch` (Python) —
+  unused; configuration comes from real environment variables only.
+- SQLite (`sqlite3`) and the previous `/documents` endpoints — the backend is
+  stateless by design; all state lives in the browser.
 
 ---
 
-## B. Minimal Data Model (TypeScript Interfaces)
+## B. Canonical Data Model
+
+Kept byte-for-byte identical between `frontend/src/xanadu.ts` and the Pydantic
+models in `backend/app.py` (camelCase on both sides).
 
 ```typescript
-// 1. Immutable Document & Version Store (Xanadu I-Space / V-Space inspired)
 export interface DocumentRecord {
-  docId: string;              // e.g., "doc_xanadu_1981"
-  title: string;
-  latestVersion: number;      // monotonically increasing integer (1, 2, 3...)
-  createdAt: string;          // ISO-8601 timestamp
-}
-
-export interface DocumentVersion {
-  docVersionId: string;       // "${docId}@v${version}" (immutable primary key)
   docId: string;
-  version: number;
-  content: string;            // immutable raw text (I-space content)
-  contentHash: string;        // SHA-256 of content
-  parentVersionId?: string;   // previous version "${docId}@v${version - 1}"
+  title: string;
+  latestVersion: number;
   createdAt: string;
 }
 
-// 2. Span Addressing (Pinned to an Immutable DocumentVersion)
-export interface SpanAddress {
-  spanId: string;             // deterministic ID: "${docId}@v${version}:${start}-${end}"
+export interface DocumentVersion {      // APPEND-ONLY: never mutated, never deleted
+  docVersionId: string;                  // `${docId}@v${version}`
   docId: string;
-  docVersionId: string;       // e.g., "doc_xanadu_1981@v1"
   version: number;
-  start: number;              // 0-based inclusive character offset (TextPositionSelector)
-  end: number;                // 0-based exclusive character offset
-  exact: string;              // verbatim text slice at creation (TextQuoteSelector)
-  prefix: string;             // 32 chars before start for fuzzy fallback anchoring
-  suffix: string;             // 32 chars after end for fuzzy fallback anchoring
+  content: string;
+  contentHash: string;                   // SHA-256 via crypto.subtle
+  parentVersionId: string | null;
+  createdAt: string;
 }
 
-// 3. Transclusion / Wikilink Edge (Graph & Side-by-Side View)
+export interface SpanAddress {           // half-open, 0-based, version-pinned
+  spanId: string;                        // `${docId}@v${version}:${start}-${end}`
+  docId: string;
+  docVersionId: string;
+  version: number;
+  start: number;
+  end: number;
+  exact: string;
+  prefix: string;                        // 32 chars before start
+  suffix: string;                        // 32 chars after end
+}
+
 export interface SpanLink {
   linkId: string;
-  type: "transclusion" | "wikilink" | "block_ref" | "citation";
-  fromSpan: SpanAddress;      // quoting / referencing span
-  toSpan: SpanAddress;        // quoted / target source span
+  linkType: "transclusion" | "wikilink" | "block_ref" | "citation";
+  fromDocVersionId: string;
+  fromStart: number;
+  fromEnd: number;
+  toDocVersionId: string;
+  toStart: number;
+  toEnd: number;
+  exactQuote: string;
+  prefix: string;
+  suffix: string;
 }
 
-// 4. AI Answer with Sentence Attribution, Ghost Claims & Stale Detection
 export interface AnswerSentenceClaim {
   sentenceIndex: number;
   text: string;
-  answerStart: number;        // char offset inside AI answer text
+  answerStart: number;
   answerEnd: number;
-  citedSpans: SpanAddress[];  // empty [] if LLM emitted no citation
-  groundingStatus: "supported" | "unsupported"; // "unsupported" = Ghost Claim
-  hallucinationConfidence: number; // from LettuceDetect (0.0 to 1.0)
-  stalenessStatus: "fresh" | "outdated"; // "outdated" if any citedSpan mutated in latestVersion
-  remappedSpans?: {
-    originalSpanId: string;
-    latestDocVersionId: string;
-    newStart: number;
-    newEnd: number;
-    currentText: string;
-    isMutated: boolean;       // true when currentText !== exact
-  }[];
+  citedSpans: SpanAddress[];             // empty [] => Ghost Claim
+  groundingStatus: "supported" | "unsupported";
+  hallucinationConfidence: number;       // simple mode: 0.0 / 1.0
+  stalenessStatus: "fresh" | "outdated"; // recomputed in the browser
 }
 
 export interface AIAnswerRecord {
   answerId: string;
   question: string;
   fullText: string;
-  createdAt: string;
-  traversalPath: {            // drives Feature 4 animated graph hops
-    step: number;
-    fromDocId: string | null;
-    toDocId: string;
-    spanId: string;
-    timestampMs: number;
-  }[];
+  traversal: { step: number; fromDocId: string; toDocId: string; spanId: string }[];
   sentences: AnswerSentenceClaim[];
-  isStale: boolean;           // true if sentences.some(s => s.stalenessStatus === "outdated")
+  createdAt: string;
 }
 ```
 
+The backend never stores an answer; `POST /ask` streams `hop` events and one
+`answer` event, and the browser appends it to `aiAnswers` in `localStorage`.
+
 ---
 
-## C. Top 3 Technical & Rules Risks + Fallbacks
+## C. Reused Algorithms (no code copied verbatim)
 
-1. **Risk 1 — Heavy PyTorch / Transformer Cold-Start on Free-Tier CPU Hosting (Feature 2):**
-   - *Why it happens:* Loading `ModernBERT` in [`KRLabsOrg/LettuceDetect`](https://github.com/KRLabsOrg/LettuceDetect) can exceed 512 MB RAM on constrained free tiers.
-   - *Fallback Pick:* Use the 17M-parameter `TinyLettuce` model inside [`KRLabsOrg/LettuceDetect`](https://github.com/KRLabsOrg/LettuceDetect) (`docs/TINYLETTUCE.md`), or fall back to single-pass structured citation prompts from [`anthropics/claude-cookbooks`](https://github.com/anthropics/claude-cookbooks) ([`patterns/agents/prompts/citations_agent.md`](https://github.com/anthropics/anthropic-cookbook/blob/main/patterns/agents/prompts/citations_agent.md)) combined with deterministic exact-substring verification against `SpanAddress.exact`.
-2. **Risk 2 — Complete Paragraph Rewrites Breaking Offset Remapping (Feature 1):**
-   - *Why it happens:* Character-index remapping via `diff_xIndex` in [`nonoroazoro/diff-match-patch-typescript`](https://github.com/nonoroazoro/diff-match-patch-typescript) shifts offsets accurately for insertions/deletions outside a span, but if an author cuts and moves a paragraph to another section of the document, pure offset diffing treats it as deleted.
-   - *Fallback Pick:* Use the fuzzy `TextQuoteSelector` (`{exact, prefix, suffix}`) matcher in [`hypothesis/client`](https://github.com/hypothesis/client) (`src/annotator/anchoring/`) or CRDT `RelativePosition` anchors in [`yjs/yjs`](https://github.com/yjs/yjs) (`createRelativePositionFromTypeIndex` / `createAbsolutePositionFromRelativePosition`) to track moved spans.
-3. **Risk 3 — DOM Scroll Desynchronization of SVG Bridges in Side-by-Side View (Feature 4):**
-   - *Why it happens:* When scrolling independent document panes, SVG overlay arrows in [`Eliav2/react-xarrows`](https://github.com/Eliav2/react-xarrows) can lag behind the scroll container if updates are not throttled on `onScroll`.
-   - *Fallback Pick:* Call the `useXarrow()` hook inside a `requestAnimationFrame`-throttled `onScroll` handler on both document panes, or fall back to [`jacomyal/sigma.js`](https://github.com/jacomyal/sigma.js/) WebGL canvas rendering for all inter-document links.
+1. **`TextQuoteSelector` anchoring** — the `{exact, prefix, suffix}` selector
+   shape and the "unique match wins, otherwise score the context" strategy are
+   adapted from [`hypothesis/client`](https://github.com/hypothesis/client)
+   (`src/annotator/anchoring/`), BSD-2-Clause. Reimplemented in
+   `checkSpanStaleness()`.
+2. **Citation-agent prompt** — the "wrap sources, demand inline span citations,
+   verify afterwards" structure follows
+   [`anthropics/claude-cookbooks`](https://github.com/anthropics/claude-cookbooks)
+   `patterns/agents/prompts/citations_agent.md`, MIT. Adapted in `build_prompt()`.
+3. **Diff/patch offset translation** — `diff_main` + `diff_xIndex` semantics come
+   from [`google/diff-match-patch`](https://github.com/google/diff-match-patch)
+   (Apache-2.0) through its TypeScript port.
 
 ---
 
 ## D. Third-Party Attribution & License Ledger
 
-Include this section in your repository documentation and reference it in your Devpost submission write-up to satisfy the disclosure requirement of the [Kiroween 2026 Official Rules](https://kiroween.devpost.com/rules):
+Include this section in your repository documentation and reference it in your
+Devpost submission write-up to satisfy the disclosure requirement of the
+[Kiroween 2026 Official Rules](https://kiroween.devpost.com/rules).
 
-- **`nonoroazoro/diff-match-patch-typescript`** — [https://github.com/nonoroazoro/diff-match-patch-typescript](https://github.com/nonoroazoro/diff-match-patch-typescript)
-  - *Author:* Nonoroazoro (TypeScript port of [`google/diff-match-patch`](https://github.com/google/diff-match-patch) by Neil Fraser / Google Inc.)
-  - *License:* Apache-2.0
-  - *Reused Scope:* `diff_main`, `diff_xIndex`, and `match_main` methods for character-offset remapping and stale-span detection across immutable document versions.
-- **`hypothesis/client`** — [https://github.com/hypothesis/client](https://github.com/hypothesis/client) (and [`tilgovi/dom-anchor-text-quote`](https://github.com/tilgovi/dom-anchor-text-quote))
-  - *Author:* Hypothes.is Project & Contributors (Randall Leeds, Robert Knight, et al.)
-  - *License:* BSD-2-Clause (`hypothesis/client`) / MIT (`dom-anchor-text-quote`)
-  - *Reused Scope:* W3C Web Annotation `TextPositionSelector` and `TextQuoteSelector` (`{exact, prefix, suffix}`) anchoring patterns in `src/annotator/anchoring/`.
-- **`yjs/yjs`** — [https://github.com/yjs/yjs](https://github.com/yjs/yjs)
-  - *Author:* Kevin Jahns (`@dmonad`) & Contributors
-  - *License:* MIT
-  - *Reused Scope:* Optional CRDT `RelativePosition` (`createRelativePositionFromTypeIndex`, `createAbsolutePositionFromRelativePosition`) and `Snapshot` patterns for edit-surviving span anchors.
-- **`KRLabsOrg/LettuceDetect`** — [https://github.com/KRLabsOrg/LettuceDetect](https://github.com/KRLabsOrg/LettuceDetect)
-  - *Author:* Ádám Kovács, Gábor Recski, & KRLabsOrg Contributors
-  - *License:* MIT
-  - *Reused Scope:* `HallucinationDetector.predict(..., output_format="spans")` in `lettucedetect/models/inference.py` and FastAPI wrapper in `lettucedetect_api/` for span-level ghost-claim detection.
-- **`Liyan06/MiniCheck`** — [https://github.com/Liyan06/MiniCheck](https://github.com/Liyan06/MiniCheck)
-  - *Author:* Liyan Tang, Philippe Laban, Greg Durrett
-  - *License:* Apache-2.0
-  - *Reused Scope:* Optional sentence-level grounding verification interface (`MiniCheck.score` in `minicheck/minicheck.py`).
-- **`anthropics/claude-cookbooks`** — [https://github.com/anthropics/claude-cookbooks](https://github.com/anthropics/claude-cookbooks)
-  - *Author:* Anthropic, PBC & Contributors
-  - *License:* MIT
-  - *Reused Scope:* Citation agent prompt pattern ([`patterns/agents/prompts/citations_agent.md`](https://github.com/anthropics/anthropic-cookbook/blob/main/patterns/agents/prompts/citations_agent.md)) for non-destructive inline span citation tagging.
-- **`vasturiano/react-force-graph`** — [https://github.com/vasturiano/react-force-graph](https://github.com/vasturiano/react-force-graph)
-  - *Author:* Vasco Asturiano (`@vasturiano`)
-  - *License:* MIT
-  - *Reused Scope:* `ForceGraph2D` component, `linkDirectionalParticles`, `nodeCanvasObject`, and `emitParticle(link)` API for real-time AI link-traversal animation.
-- **`Eliav2/react-xarrows`** — [https://github.com/Eliav2/react-xarrows](https://github.com/Eliav2/react-xarrows)
-  - *Author:* Eliav (`@Eliav2`) & Contributors
-  - *License:* MIT
-  - *Reused Scope:* `Xarrow`, `Xwrapper`, and `useXarrow` hook in `src/` for drawing animated SVG transclusion bridges between DOM `<mark>` spans across side-by-side documents.
-- **`jacomyal/sigma.js`** — [https://github.com/jacomyal/sigma.js/](https://github.com/jacomyal/sigma.js/)
-  - *Author:* Alexis Jacomy, Benoît Simard, Guillaume Plique (OuestWare & Sciences Po médialab)
-  - *License:* MIT
-  - *Reused Scope:* Fallback WebGL graph rendering and `nodeReducer`/`edgeReducer` highlighting patterns.
-- **`jackyzha0/quartz`** — [https://github.com/jackyzha0/quartz](https://github.com/jackyzha0/quartz) (and [`tscolari/obsidian-graph-mcp`](https://github.com/tscolari/obsidian-graph-mcp))
-  - *Author:* Jacky Zhao (`@jackyzha0`) & Contributors; Tiago Scolari (`@tscolari`)
-  - *License:* MIT
-  - *Reused Scope:* Obsidian Flavored Markdown `[[wikilink]]`, `![[embed]]`, and `#^block-id` regex and backlink graph resolution logic from `quartz/plugins/transformers/ofm.ts` and `internal/vault/parser.go`.
+| Package | Version | License | Reused scope |
+| :--- | :--- | :--- | :--- |
+| `react` | 19.3.1 | MIT | UI runtime |
+| `react-dom` | 19.3.1 | MIT | `createRoot` mount |
+| `react-force-graph-2d` | 1.29.2 | MIT | `ForceGraph2D`, `nodeCanvasObject`, `emitParticle` |
+| `react-xarrows` | 2.2.1 | MIT | `Xarrow`, `Xwrapper`, `useXarrow` |
+| `diff-match-patch-typescript` | 1.1.3 | Apache-2.0 | `DiffMatchPatch.diff_main`, `diff_xIndex`, `diff_cleanupSemantic` |
+| `vite` | 8.4.0 | MIT | dev server + production build |
+| `@vitejs/plugin-react` | 6.3.0 | MIT | React transform |
+| `typescript` | 7.0.2 | Apache-2.0 | type checking / `tsc --noEmit` |
+| `@types/react` | 19.3.3 | MIT | types |
+| `@types/react-dom` | 19.3.0 | MIT | types |
+| `fastapi` | 0.165.0 | MIT | `POST /ask`, `GET /health`, CORS |
+| `pydantic` | 2.14.4 | MIT | request/response contracts |
+| `httpx` | 0.29.0 | BSD-3-Clause | single REST call to the LLM |
+| `uvicorn` | 0.54.0 | BSD-3-Clause | local ASGI server |
+
+Adapted (not installed): `hypothesis/client` (BSD-2-Clause),
+`anthropics/claude-cookbooks` (MIT), `google/diff-match-patch` (Apache-2.0).

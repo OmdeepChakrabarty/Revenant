@@ -190,7 +190,7 @@ function App() {
         <section className="pane">
           <div className="pane-head">
             <h2>Link graph</h2>
-            <span className="mono muted">live hopped</span>
+            <span className="mono muted">hop stream</span>
           </div>
           <div className="pane-body tight">
             <GraphView

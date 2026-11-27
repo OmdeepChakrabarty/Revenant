@@ -477,6 +477,7 @@ export function SpanBridges({ answer, visibleSpanIds }: SpanBridgesProps) {
               animateDrawing={0.3}
               headSize={4}
               zIndex={5}
+              divContainerProps={{ className: "span-bridge" }}
             />
           )),
       )}
