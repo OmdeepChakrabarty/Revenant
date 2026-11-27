@@ -1,0 +1,16 @@
+# dependencies / build output
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+
+# local secrets and scratch state
+.env
+.env.*
+!.env.example
+*.db
+
+# editor / OS noise
+.DS_Store
+.vscode/
