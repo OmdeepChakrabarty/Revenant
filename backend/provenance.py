@@ -50,7 +50,8 @@ def build_prompt(retrieved: List[Dict[str, Any]], question: str) -> str:
         "where docId@vN:start-end is copied verbatim from a [SPAN ...] tag.\n"
         "3. Never cite a span that is not listed above.\n"
         "4. Keep the answer to at most four sentences.\n"
-        "5. If the spans do not answer the question, say so without citing anything.\n\n"
+        "5. If the spans do not answer the question, say so without citing anything.\n"
+        "6. Do not repeat the quoted wording outside the <cite> tags; write each sentence once.\n\n"
         "Answer:"
     )
 
@@ -105,8 +106,18 @@ def build_fake_answer(retrieved: List[Dict[str, Any]]) -> str:
     return " ".join(sentences)
 
 
+def _normalize(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
 def strip_cites(text: str) -> Tuple[str, List[Tuple[str, int, int]]]:
-    """Remove <cite> tags, returning clean text and cite positions in that text."""
+    """
+    Remove <cite> tags, returning clean text and cite positions in that text.
+
+    Models often write a claim and then repeat the quoted span inside the tag.
+    When the quote already ends the sentence, it is dropped so the reader does
+    not see the sentence twice; the citation still attaches to that position.
+    """
     clean: List[str] = []
     citations: List[Tuple[str, int, int]] = []
     cursor = 0
@@ -116,10 +127,16 @@ def strip_cites(text: str) -> Tuple[str, List[Tuple[str, int, int]]]:
         clean.append(plain)
         length += len(plain)
         inner = match.group(2)
+        already = _normalize("".join(clean))
         start = length
-        clean.append(inner)
-        length += len(inner)
-        citations.append((match.group(1), start, length))
+        if inner and _normalize(inner) and already.endswith(_normalize(inner)):
+            # Anchor the citation to the claim's last character so it stays in range.
+            quote_end = max(1, length - 1)
+            citations.append((match.group(1), max(0, quote_end - 1), quote_end))
+        else:
+            clean.append(inner)
+            length += len(inner)
+            citations.append((match.group(1), start, length))
         cursor = match.end()
     clean.append(text[cursor:])
     return "".join(clean), citations
