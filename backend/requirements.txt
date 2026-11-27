@@ -1,0 +1,8 @@
+fastapi==0.115.5
+uvicorn[standard]
+python-multipart
+python-dotenv
+httpx
+diff-match-patch==20230430
+lettucedetect
+pytest
