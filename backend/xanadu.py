@@ -1,306 +1,216 @@
 """
-Xanadu Core: Immutable document store, span slicing, link graph, Obsidian import.
+xanadu.py — pure, stateless span and link-graph helpers.
+
+No database, no disk writes: every function here takes the documents and links
+that arrived in the POST /ask body and returns plain dicts.
 """
-import sqlite3
-import hashlib
 import re
-from typing import List, Dict, Optional, Any
-from dataclasses import dataclass, asdict
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-DB_PATH = "xanadu.db"
+CONTEXT_WINDOW = 32
+MAX_HOPS = 2
+MAX_SPANS = 6
 
-@dataclass
-class DocumentRecord:
-    doc_id: str
-    title: str
-    latest_version: int
-    created_at: str
+STOP_WORDS = {
+    "the", "a", "an", "and", "or", "but", "if", "of", "to", "in", "on", "at",
+    "for", "with", "by", "from", "as", "is", "are", "was", "were", "be", "been",
+    "being", "it", "its", "this", "that", "these", "those", "which", "who",
+    "whom", "whose", "what", "when", "where", "why", "how", "not", "no", "do",
+    "does", "did", "can", "could", "should", "would", "may", "might", "must",
+    "will", "shall", "have", "has", "had", "than", "then", "there", "their",
+    "they", "them", "he", "she", "his", "her", "we", "our", "you", "your", "i",
+    "so", "such", "into", "about", "over", "under", "also", "any", "all", "one",
+    "more", "most", "some", "only", "because", "while", "after", "before",
+}
 
-@dataclass
-class DocumentVersion:
-    doc_version_id: str
-    doc_id: str
-    version: int
-    content: str
-    content_hash: str
-    parent_version_id: Optional[str]
-    created_at: str
 
-@dataclass
-class SpanAddress:
-    span_id: str
-    doc_id: str
-    doc_version_id: str
-    version: int
-    start: int
-    end: int
-    exact: str
+# ------------------------------------------------------------------ spans
 
-@dataclass
-class SpanLink:
-    link_id: str
-    link_type: str
-    from_doc_version_id: str
-    from_start: int
-    from_end: int
-    to_doc_version_id: str
-    to_start: int
-    to_end: int
-    exact_quote: str
+def make_span(doc_id: str, version: int, content: str, start: int, end: int) -> Dict[str, Any]:
+    """Build the canonical half-open span address, clamped to the content."""
+    start = max(0, min(int(start), len(content)))
+    end = max(start, min(int(end), len(content)))
+    return {
+        "spanId": f"{doc_id}@v{version}:{start}-{end}",
+        "docId": doc_id,
+        "docVersionId": f"{doc_id}@v{version}",
+        "version": int(version),
+        "start": start,
+        "end": end,
+        "exact": content[start:end],
+        "prefix": content[max(0, start - CONTEXT_WINDOW):start],
+        "suffix": content[end:end + CONTEXT_WINDOW],
+    }
 
-def init_db(conn: sqlite3.Connection):
-    """Create tables if they don't exist."""
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS documents (
-            doc_id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            latest_version INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS document_versions (
-            doc_version_id TEXT PRIMARY KEY,
-            doc_id TEXT NOT NULL,
-            version INTEGER NOT NULL,
-            content TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            parent_version_id TEXT,
-            created_at TEXT NOT NULL,
-            FOREIGN KEY (doc_id) REFERENCES documents(doc_id)
-        );
-        CREATE TABLE IF NOT EXISTS span_links (
-            link_id TEXT PRIMARY KEY,
-            link_type TEXT NOT NULL,
-            from_doc_version_id TEXT NOT NULL,
-            from_start INTEGER NOT NULL,
-            from_end INTEGER NOT NULL,
-            to_doc_version_id TEXT NOT NULL,
-            to_start INTEGER NOT NULL,
-            to_end INTEGER NOT NULL,
-            exact_quote TEXT NOT NULL,
-            FOREIGN KEY (from_doc_version_id) REFERENCES document_versions(doc_version_id),
-            FOREIGN KEY (to_doc_version_id) REFERENCES document_versions(doc_version_id)
-        );
-        CREATE TABLE IF NOT EXISTS ai_answers (
-            answer_id TEXT PRIMARY KEY,
-            question TEXT NOT NULL,
-            full_text TEXT NOT NULL,
-            traversal_json TEXT NOT NULL,
-            sentences_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        );
-    """)
-    conn.commit()
 
-def _sha256(content: str) -> str:
-    return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-def _now() -> str:
-    from datetime import datetime
-    return datetime.utcnow().isoformat() + "Z"
-
-def create_document(conn: sqlite3.Connection, title: str, content: str) -> str:
-    """Create a new document with version 1."""
-    doc_id = f"doc_{title.lower().replace(' ', '_')}"
-    doc_version_id = f"{doc_id}@v1"
-    content_hash = _sha256(content)
-    created_at = _now()
-    
-    conn.execute(
-        "INSERT INTO documents (doc_id, title, latest_version, created_at) VALUES (?, ?, 1, ?)",
-        (doc_id, title, created_at)
-    )
-    conn.execute(
-        "INSERT INTO document_versions (doc_version_id, doc_id, version, content, content_hash, parent_version_id, created_at) VALUES (?, ?, 1, ?, ?, NULL, ?)",
-        (doc_version_id, doc_id, content, content_hash, created_at)
-    )
-    conn.commit()
-    return doc_id
-
-def edit_document(conn: sqlite3.Connection, doc_id: str, new_content: str) -> str:
-    """Append new version (never overwrite). Returns new doc_version_id."""
-    cur = conn.execute("SELECT latest_version FROM documents WHERE doc_id = ?", (doc_id,))
-    row = cur.fetchone()
-    if not row:
-        raise ValueError(f"Document {doc_id} not found")
-    new_version = row[0] + 1
-    doc_version_id = f"{doc_id}@v{new_version}"
-    content_hash = _sha256(new_content)
-    parent_version_id = f"{doc_id}@v{row[0]}"
-    created_at = _now()
-    
-    conn.execute(
-        "UPDATE documents SET latest_version = ? WHERE doc_id = ?",
-        (new_version, doc_id)
-    )
-    conn.execute(
-        "INSERT INTO document_versions (doc_version_id, doc_id, version, content, content_hash, parent_version_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (doc_version_id, doc_id, new_version, new_content, content_hash, parent_version_id, created_at)
-    )
-    conn.commit()
-    return doc_version_id
-
-def get_document(conn: sqlite3.Connection, doc_id: str) -> Optional[DocumentRecord]:
-    """Get latest document record."""
-    cur = conn.execute("SELECT doc_id, title, latest_version, created_at FROM documents WHERE doc_id = ?", (doc_id,))
-    row = cur.fetchone()
-    if not row:
+def parse_span_id(span_id: str) -> Optional[Tuple[str, int, int, int]]:
+    """Parse `docId@vN:start-end` -> (docId, version, start, end)."""
+    match = re.match(r"^(?P<doc>.+)@v(?P<ver>\d+):(?P<start>\d+)-(?P<end>\d+)$", span_id or "")
+    if not match:
         return None
-    return DocumentRecord(doc_id=row[0], title=row[1], latest_version=row[2], created_at=row[3])
-
-def get_all_documents(conn: sqlite3.Connection) -> List[DocumentRecord]:
-    """List all documents."""
-    cur = conn.execute("SELECT doc_id, title, latest_version, created_at FROM documents")
-    return [DocumentRecord(doc_id=r[0], title=r[1], latest_version=r[2], created_at=r[3]) for r in cur.fetchall()]
-
-def get_version(conn: sqlite3.Connection, doc_version_id: str) -> Optional[DocumentVersion]:
-    """Get a specific version."""
-    cur = conn.execute("SELECT doc_version_id, doc_id, version, content, content_hash, parent_version_id, created_at FROM document_versions WHERE doc_version_id = ?", (doc_version_id,))
-    row = cur.fetchone()
-    if not row:
-        return None
-    return DocumentVersion(doc_version_id=row[0], doc_id=row[1], version=row[2], content=row[3], content_hash=row[4], parent_version_id=row[5], created_at=row[6])
-
-def get_latest_version(conn: sqlite3.Connection, doc_id: str) -> Optional[DocumentVersion]:
-    """Get the latest version of a document."""
-    doc = get_document(conn, doc_id)
-    if not doc:
-        return None
-    return get_version(conn, f"{doc_id}@v{doc.latest_version}")
-
-def slice_span(conn: sqlite3.Connection, doc_version_id: str, start: int, end: int) -> SpanAddress:
-    """Create a span address from a document version."""
-    ver = get_version(conn, doc_version_id)
-    if not ver:
-        raise ValueError(f"Version {doc_version_id} not found")
-    # Parse doc_id and version from doc_version_id
-    doc_id, version_str = doc_version_id.rsplit("@v", 1)
-    version = int(version_str)
-    exact = ver.content[start:end]
-    return SpanAddress(
-        span_id=f"{doc_id}@v{version}:{start}-{end}",
-        doc_id=doc_id,
-        doc_version_id=doc_version_id,
-        version=version,
-        start=start,
-        end=end,
-        exact=exact
+    return (
+        match.group("doc"),
+        int(match.group("ver")),
+        int(match.group("start")),
+        int(match.group("end")),
     )
 
-def _parse_wikilinks(content: str, doc_id: str, doc_version_id: str) -> List[Dict]:
-    """Parse [[DocName]] style links from content."""
-    # Match [[Title]] or [[Title#Heading]]
-    pattern = r'\[\[([^\]|]+)(?:#([^\]|]+))?\]\]'
-    links = []
-    for match in re.finditer(pattern, content):
-        target_title = match.group(1).strip()
-        links.append({
-            "target_title": target_title,
-            "start": match.start(),
-            "end": match.end()
-        })
-    return links
 
-def _create_span_link(conn: sqlite3.Connection, from_doc_version_id: str, from_start: int, from_end: int, to_doc_version_id: str, to_start: int, to_end: int, exact_quote: str):
-    """Insert a span link."""
-    from_doc_id, from_v = from_doc_version_id.rsplit("@v", 1)
-    to_doc_id, to_v = to_doc_version_id.rsplit("@v", 1)
-    link_id = f"link_{from_doc_id}_{from_start}_{to_doc_id}_{to_start}"
-    conn.execute(
-        "INSERT OR IGNORE INTO span_links (link_id, link_type, from_doc_version_id, from_start, from_end, to_doc_version_id, to_start, to_end, exact_quote) VALUES (?, 'transclusion', ?, ?, ?, ?, ?, ?, ?)",
-        (link_id, from_doc_version_id, from_start, from_end, to_doc_version_id, to_start, to_end, exact_quote)
-    )
+def doc_id_of(doc_version_id: str) -> str:
+    """`doc@v3` -> `doc`."""
+    return (doc_version_id or "").rsplit("@v", 1)[0]
 
-def get_graph(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """Return nodes and links for ForceGraph2D."""
-    docs = get_all_documents(conn)
-    nodes = [{"id": d.doc_id, "label": d.title} for d in docs]
-    
-    links = []
-    cur = conn.execute("SELECT link_id, from_doc_version_id, from_start, from_end, to_doc_version_id, to_start, to_end, exact_quote FROM span_links")
-    for row in cur.fetchall():
-        from_doc_version_id = row["from_doc_version_id"]
-        to_doc_version_id = row["to_doc_version_id"]
-        from_doc_id = from_doc_version_id.rsplit("@v", 1)[0]
-        to_doc_id = to_doc_version_id.rsplit("@v", 1)[0]
-        links.append({
-            "source": from_doc_id,
-            "target": to_doc_id,
-            "label": "transclusion"
-        })
-    return {"nodes": nodes, "links": links}
 
-def walk_graph(conn: sqlite3.Connection, start_doc_id: str, max_hops: int = 2, max_spans: int = 10) -> List[SpanAddress]:
-    """BFS traversal from start_doc_id, returning up to max_spans."""
-    visited = set()
-    queue = [(start_doc_id, 0)]
-    spans = []
-    
-    while queue and len(spans) < max_spans:
-        doc_id, hop = queue.pop(0)
-        if doc_id in visited or hop > max_hops:
+# ---------------------------------------------------------------- text
+
+def split_sentences(text: str) -> List[str]:
+    return [chunk.strip() for chunk in re.split(r"(?<=[.!?])\s+", text or "") if chunk.strip()]
+
+
+def content_words(text: str) -> set:
+    """Lowercased, stop-word-free content words (>= 3 chars)."""
+    words = re.findall(r"[a-z0-9']+", (text or "").lower())
+    return {w for w in words if len(w) >= 3 and w not in STOP_WORDS}
+
+
+def overlap_ratio(sentence: str, cited_text: str) -> float:
+    """Share of the sentence's content words that appear in the cited text."""
+    words = content_words(sentence)
+    if not words:
+        return 0.0
+    return len(words & content_words(cited_text)) / len(words)
+
+
+# --------------------------------------------------------- retrieval
+
+def latest_documents(documents: Iterable[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Index the request documents by id, keeping the highest version sent."""
+    index: Dict[str, Dict[str, Any]] = {}
+    for doc in documents or []:
+        doc_id = str(doc.get("docId", "")).strip()
+        if not doc_id:
             continue
-        visited.add(doc_id)
-        
-        # Get all links from this doc
-        cur = conn.execute(
-            "SELECT to_doc_version_id, to_start, to_end FROM span_links sl JOIN document_versions dv ON sl.from_doc_version_id = dv.doc_version_id WHERE dv.doc_id = ?",
-            (doc_id,)
-        )
-        for row in cur.fetchall():
-            to_doc_version_id = row[0]
-            to_start = row[1]
-            to_end = row[2]
-            span = slice_span(conn, to_doc_version_id, to_start, to_end)
-            spans.append(span)
-            
-            to_doc_id = to_doc_version_id.rsplit("@v", 1)[0]
-            if to_doc_id not in visited and hop + 1 <= max_hops:
-                queue.append((to_doc_id, hop + 1))
-    
-    return spans
+        version = int(doc.get("version", 1) or 1)
+        current = index.get(doc_id)
+        if current is None or version >= int(current["version"]):
+            index[doc_id] = {
+                "docId": doc_id,
+                "title": str(doc.get("title") or doc_id),
+                "version": version,
+                "content": str(doc.get("content") or ""),
+            }
+    return index
 
-def seed_documents(conn: sqlite3.Connection):
-    """Seed 5 linked sample documents."""
-    docs = [
-        ("Xanadu Overview", "Xanadu is a hypermedia system invented by Ted Nelson in 1981. It enables [[Link Types]] through transclusion. See [[Nelson 1981 Paper]] for original design."),
-        ("Nelson 1981 Paper", "The 1981 paper describes [[Xanadu Overview]] as a system for non-sequential writing. It introduces the concept of [[Hypertext Definition]]."),
-        ("Hypertext Definition", "Hypertext is text displayed on a computer or other electronic device with references (hyperlinks) to other text that the reader can immediately access. See [[Modern Web Critique]]."),
-        ("Modern Web Critique", "The modern web diverges from [[Nelson 1981 Paper]] ideals. Links are one-way, not bidirectional like in [[Link Types]]."),
-        ("Link Types", "Xanadu supports transclusion, wikilinks, block references, and citations. Each link type enables different [[Hypertext Definition]] patterns.")
-    ]
-    
-    for title, content in docs:
-        doc_id = create_document(conn, title, content)
-    
-    # Parse wikilinks and create span_links
-    all_docs = {d.title: d.doc_id for d in get_all_documents(conn)}
-    
-    for doc in get_all_documents(conn):
-        ver = get_latest_version(conn, doc.doc_id)
-        if not ver:
+
+def find_start_doc(documents: Dict[str, Dict[str, Any]], question: str) -> Optional[str]:
+    """Pick the document whose title/body best matches the question."""
+    if not documents:
+        return None
+    terms = content_words(question)
+    best_id: Optional[str] = None
+    best_score = -1.0
+    for doc_id, doc in documents.items():
+        title_words = content_words(doc["title"])
+        body_words = content_words(doc["content"])
+        score = 3.0 * len(terms & title_words) + 1.0 * len(terms & body_words)
+        if score > best_score:
+            best_score = score
+            best_id = doc_id
+    return best_id
+
+
+def _own_spans(doc: Dict[str, Any], question: str, limit: int = 2) -> List[Dict[str, Any]]:
+    """Up to `limit` relevant sentence spans from a single document."""
+    terms = content_words(question)
+    candidates: List[Tuple[float, int, int]] = []
+    cursor = 0
+    for sentence in split_sentences(doc["content"]):
+        start = doc["content"].find(sentence, cursor)
+        if start < 0:
+            start = doc["content"].find(sentence)
+        if start < 0:
             continue
-        wikilinks = _parse_wikilinks(ver.content, doc.doc_id, ver.doc_version_id)
-        
-        for wl in wikilinks:
-            target_title = wl["target_title"]
-            if target_title in all_docs:
-                target_doc_id = all_docs[target_title]
-                target_ver = get_latest_version(conn, target_doc_id)
-                if target_ver:
-                    # Link to first 50 chars of target content as the "span"
-                    to_start = 0
-                    to_end = min(50, len(target_ver.content))
-                    exact = target_ver.content[to_start:to_end]
-                    _create_span_link(
-                        conn, ver.doc_version_id, wl["start"], wl["end"],
-                        target_ver.doc_version_id, to_start, to_end,
-                        exact
-                    )
-    
-    conn.commit()
+        end = start + len(sentence)
+        cursor = end
+        score = len(terms & content_words(sentence))
+        candidates.append((score, start, end))
+    if not candidates:
+        return []
+    if terms:
+        candidates.sort(key=lambda c: (-c[0], c[1]))
+    else:
+        candidates.sort(key=lambda c: c[1])
+    chosen = sorted(candidates[:limit], key=lambda c: c[1])
+    return [make_span(doc["docId"], doc["version"], doc["content"], s, e) for _, s, e in chosen]
 
-def get_connection() -> sqlite3.Connection:
-    """Get a database connection."""
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+
+def walk_graph(
+    documents: Dict[str, Dict[str, Any]],
+    links: Iterable[Dict[str, Any]],
+    start_doc_id: str,
+    question: str = "",
+    max_hops: int = MAX_HOPS,
+    max_spans: int = MAX_SPANS,
+) -> List[Dict[str, Any]]:
+    """
+    Retrieve spans by walking the link graph breadth-first.
+
+    Each returned entry is `{"hop": {step, fromDocId, toDocId, spanId}, "span": SpanAddress}`.
+    The first entries are spans read inside the starting document, then every
+    traversed link contributes one entry, so a two-document request with one
+    link always yields at least two hops.
+    """
+    start = documents.get(start_doc_id)
+    if not start:
+        return []
+
+    retrieved: List[Dict[str, Any]] = []
+    seen_spans: set = set()
+
+    def add(from_doc: str, span: Dict[str, Any]) -> bool:
+        if span["spanId"] in seen_spans or len(retrieved) >= max_spans:
+            return False
+        seen_spans.add(span["spanId"])
+        retrieved.append({
+            "hop": {
+                "step": len(retrieved) + 1,
+                "fromDocId": from_doc,
+                "toDocId": span["docId"],
+                "spanId": span["spanId"],
+            },
+            "span": span,
+        })
+        return True
+
+    for span in _own_spans(start, question):
+        add(start_doc_id, span)
+
+    outgoing = list(links or [])
+    visited_docs = {start_doc_id}
+    frontier = [start_doc_id]
+    for depth in range(max_hops):
+        next_frontier: List[str] = []
+        for from_doc in frontier:
+            for link in outgoing:
+                from_link_doc = doc_id_of(str(link.get("fromDocVersionId", "")))
+                target_doc = doc_id_of(str(link.get("toDocVersionId", "")))
+                if from_link_doc != from_doc or target_doc not in documents:
+                    continue
+                target = documents[target_doc]
+                span = make_span(
+                    target_doc,
+                    target["version"],
+                    target["content"],
+                    int(link.get("toStart", 0) or 0),
+                    int(link.get("toEnd", 0) or 0),
+                )
+                if add(from_doc, span) and target_doc not in visited_docs:
+                    visited_docs.add(target_doc)
+                    next_frontier.append(target_doc)
+        if not next_frontier or len(retrieved) >= max_spans:
+            break
+        frontier = next_frontier
+        if depth + 1 >= max_hops:
+            break
+
+    return retrieved
