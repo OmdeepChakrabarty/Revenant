@@ -14,9 +14,11 @@ import {
   activeDocuments,
   askQuestion,
   buildGraph,
+  consumeStorageError,
   deleteDocumentPermanently,
   DEMO_ANSWER,
   editDoc,
+  estimateStorageBytes,
   getVersionsForDoc,
   importMarkdownFiles,
   loadOrSeedStore,
@@ -49,6 +51,7 @@ function App() {
   const [importing, setImporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [sourcesOpen, setSourcesOpen] = useState(false);
+  const [storageError, setStorageError] = useState<string | null>(null);
   const timers = useRef<number[]>([]);
 
   const clearTimers = useCallback(() => {
@@ -87,6 +90,9 @@ function App() {
   const applyStore = useCallback((next: XanaduStore) => {
     setStore(next);
     setAnswer((previous) => (previous ? refreshAnswerStaleness(previous, next) : previous));
+    const failed = consumeStorageError();
+    setStorageError(failed);
+    if (failed) setNotice(failed);
   }, []);
 
   // Never leave the Reader pointed at a source that was removed or deleted.
@@ -128,6 +134,9 @@ function App() {
       const result = await askQuestion({ question: text, store, onHop: (event) => setHop(event) });
       const refreshed = refreshAnswerStaleness(result, store);
       setStore((previous) => (previous ? saveAnswer(previous, refreshed) : previous));
+      const failed = consumeStorageError();
+      setStorageError(failed);
+      if (failed) setNotice(failed);
       setAnswer(refreshed);
       setSource("live");
       const firstCited = refreshed.sentences.flatMap((s) => s.citedSpans)[0];
@@ -388,6 +397,7 @@ function App() {
       {sourcesOpen && (
         <SourcesPanel
           store={store}
+          storageError={storageError}
           onClose={() => setSourcesOpen(false)}
           onOpenDoc={openSource}
           onToggleUse={toggleSourceUse}
@@ -410,6 +420,7 @@ type SourcesConfirm =
 
 interface SourcesPanelProps {
   store: XanaduStore;
+  storageError: string | null;
   onClose: () => void;
   onOpenDoc: (docId: string) => void;
   onToggleUse: (docId: string, use: boolean) => void;
@@ -429,6 +440,7 @@ function docSizeKb(store: XanaduStore, docId: string): number {
 
 function SourcesPanel({
   store,
+  storageError,
   onClose,
   onOpenDoc,
   onToggleUse,
@@ -440,6 +452,9 @@ function SourcesPanel({
   const [confirm, setConfirm] = useState<SourcesConfirm>(null);
   const active = store.documents.filter((doc) => doc.status !== "removed");
   const removed = store.documents.filter((doc) => doc.status === "removed");
+  const usedBytes = estimateStorageBytes(store);
+  const usedMb = usedBytes / (1024 * 1024);
+  const quotaPct = Math.min(100, (usedBytes / (5 * 1024 * 1024)) * 100);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -473,6 +488,16 @@ function SourcesPanel({
         </div>
 
         <div className="sources-body">
+          {storageError && <div className="error-box">{storageError}</div>}
+          <div className="storage-line">
+            <span className="small muted">
+              Storage: {usedMb < 0.01 ? "<0.01" : usedMb.toFixed(2)} MB of about 5 MB
+            </span>
+            <span className="storage-bar" aria-hidden="true">
+              <span style={{ width: `${quotaPct}%` }} />
+            </span>
+          </div>
+
           <p className="section-title">Active sources</p>
           {active.length === 0 ? (
             <div className="empty">No active sources yet. Import a document or reset the demo data.</div>

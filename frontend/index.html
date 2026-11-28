@@ -229,6 +229,12 @@
       }
       .sources-head h2 { margin: 0 0 2px; font-size: 14px; }
       .sources-body { flex: 1; padding: 14px 16px 24px; overflow-y: auto; overflow-x: hidden; }
+      .storage-line { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; }
+      .storage-bar {
+        display: block; height: 5px; border-radius: 999px; overflow: hidden;
+        background: #0c1017; border: 1px solid var(--line);
+      }
+      .storage-bar > span { display: block; height: 100%; background: linear-gradient(90deg, #38bdf8, #a78bfa); }
       .source-row {
         min-width: 0; padding: 9px 11px; margin-bottom: 8px;
         border: 1px solid var(--line); border-radius: 10px; background: #10151e;

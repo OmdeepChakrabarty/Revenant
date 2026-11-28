@@ -325,11 +325,39 @@ function readStore(): XanaduStore | null {
   }
 }
 
-export function saveStore(store: XanaduStore): void {
+export const STORAGE_FULL_MESSAGE = "Storage is full. Remove or delete some sources.";
+
+let lastStorageError: string | null = null;
+
+/** Read and clear the outcome of the most recent store write. */
+export function consumeStorageError(): string | null {
+  const message = lastStorageError;
+  lastStorageError = null;
+  return message;
+}
+
+/**
+ * Every write goes through here inside try/catch. A failed setItem leaves the
+ * previously persisted store untouched, so nothing already saved is lost.
+ */
+export function saveStore(store: XanaduStore): boolean {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+    lastStorageError = null;
+    return true;
   } catch {
-    /* storage full or disabled — the in-memory store still works */
+    lastStorageError = STORAGE_FULL_MESSAGE;
+    return false;
+  }
+}
+
+/** Rough quota usage: the JSON payload in UTF-16, as localStorage stores it. */
+export function estimateStorageBytes(store: XanaduStore): number {
+  const json = JSON.stringify(store);
+  try {
+    return new Blob([json]).size;
+  } catch {
+    return json.length * 2;
   }
 }
 
