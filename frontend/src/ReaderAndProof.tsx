@@ -17,6 +17,7 @@ import {
   getLatestVersion,
   getVersion,
   getVersionsForDoc,
+  sourceAvailability,
 } from "./xanadu";
 import type { AIAnswerRecord, SpanAddress, StaleCheck, TraversalHop, XanaduStore } from "./xanadu";
 
@@ -35,6 +36,9 @@ interface ReaderPaneProps {
   onSelectDoc: (docId: string) => void;
   onSelectSpan: (spanId: string) => void;
   onSave: (docId: string, content: string) => Promise<void>;
+  onImportFiles: (files: File[]) => void;
+  onResetDemoData: () => void;
+  importing: boolean;
 }
 
 interface MarkRange {
@@ -80,6 +84,9 @@ export function ReaderPane({
   onSelectDoc,
   onSelectSpan,
   onSave,
+  onImportFiles,
+  onResetDemoData,
+  importing,
 }: ReaderPaneProps) {
   const activeDocs = useMemo(() => activeDocuments(store), [store]);
   const versions = useMemo(() => getVersionsForDoc(store, activeDocId), [store, activeDocId]);
@@ -151,7 +158,30 @@ export function ReaderPane({
           </>
         )}
 
-        {!viewing ? (
+        {activeDocs.length === 0 ? (
+          <div className="empty source-empty">
+            <p style={{ margin: "0 0 10px" }}>The archive has no active sources.</p>
+            <div className="empty-actions">
+              <label className="btn btn-sm import-btn">
+                {importing ? "Importing…" : "Import Markdown"}
+                <input
+                  type="file"
+                  multiple
+                  accept=".md,.markdown,.txt,text/markdown,text/plain"
+                  disabled={importing}
+                  onChange={(event) => {
+                    const files = Array.from(event.currentTarget.files ?? []);
+                    event.currentTarget.value = "";
+                    onImportFiles(files);
+                  }}
+                />
+              </label>
+              <button className="btn btn-sm" onClick={onResetDemoData}>
+                Reset demo data
+              </button>
+            </div>
+          </div>
+        ) : !viewing ? (
           <div className="empty">Select a document to read it.</div>
         ) : (
           <>
@@ -241,6 +271,7 @@ interface ProofPaneProps {
   hop: TraversalHop | null;
   selectedSpanId: string | null;
   onSelectSpan: (spanId: string) => void;
+  onJumpToSource: (docId: string, spanId: string) => void;
 }
 
 function statusLabel(sentence: AIAnswerRecord["sentences"][number]): string {
@@ -257,6 +288,7 @@ export function ProofPane({
   hop,
   selectedSpanId,
   onSelectSpan,
+  onJumpToSource,
 }: ProofPaneProps) {
   const [selectedSentence, setSelectedSentence] = useState<number | null>(null);
 
@@ -335,6 +367,14 @@ export function ProofPane({
               {answer.sentences.map((sentence) => {
                 const label = statusLabel(sentence);
                 const ghost = sentence.groundingStatus === "unsupported";
+                const availability = sentence.citedSpans.map((span) =>
+                  sourceAvailability(store, span.docId),
+                );
+                const goneBadge = availability.includes("deleted")
+                  ? "Source deleted"
+                  : availability.includes("removed")
+                    ? "Source removed"
+                    : null;
                 return (
                   <div
                     key={sentence.sentenceIndex}
@@ -355,28 +395,57 @@ export function ProofPane({
                     <span className={`s-flag ${label === "supported" ? "s-ok" : label === "outdated" ? "s-stale" : "s-bad"}`}>
                       {label}
                     </span>
+                    {goneBadge && (
+                      <span className="s-flag s-stale" style={{ marginLeft: 5 }}>
+                        {goneBadge}
+                      </span>
+                    )}
                     <div>{sentence.text}</div>
-                    <div style={{ marginTop: 4 }}>
-                      {sentence.citedSpans.map((span) => (
-                        <span
-                          key={span.spanId}
-                          className="cite-chip"
-                          title={`${span.spanId}\n${span.exact}`}
-                          style={
-                            selectedSpanId === span.spanId
-                              ? { borderColor: "rgba(125,211,252,0.8)", background: "rgba(125,211,252,0.2)" }
-                              : undefined
-                          }
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onSelectSpan(span.spanId);
-                          }}
-                        >
-                          v{span.version}:{span.start}-{span.end}
-                        </span>
-                      ))}
-                      {ghost && <span className="small muted" style={{ marginLeft: 6 }}>no retrievable source</span>}
-                    </div>
+                    {sentence.citedSpans.map((span) => {
+                      const state = sourceAvailability(store, span.docId);
+                      const gone = state !== "active";
+                      const jumpTitle = gone
+                        ? state === "removed"
+                          ? "This source was removed. Restore it to jump."
+                          : "This source was deleted permanently."
+                        : "Open the cited passage in the Reader";
+                      return (
+                        <div key={span.spanId} className={`claim-source${gone ? " gone" : ""}`}>
+                          <blockquote className="claim-quote">{span.exact}</blockquote>
+                          <div className="claim-source-row">
+                            <span
+                              className="cite-chip"
+                              title={span.spanId}
+                              style={
+                                selectedSpanId === span.spanId
+                                  ? { borderColor: "rgba(125,211,252,0.8)", background: "rgba(125,211,252,0.2)" }
+                                  : undefined
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onSelectSpan(span.spanId);
+                              }}
+                            >
+                              v{span.version}:{span.start}-{span.end}
+                            </span>
+                            <span className="jump-wrap" title={jumpTitle}>
+                              <button
+                                className="btn btn-sm jump-btn"
+                                disabled={gone}
+                                aria-label={jumpTitle}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onJumpToSource(span.docId, span.spanId);
+                                }}
+                              >
+                                Jump to source
+                              </button>
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                    {ghost && <span className="small muted">no retrievable source</span>}
                   </div>
                 );
               })}

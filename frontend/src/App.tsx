@@ -89,6 +89,17 @@ function App() {
     setAnswer((previous) => (previous ? refreshAnswerStaleness(previous, next) : previous));
   }, []);
 
+  // Never leave the Reader pointed at a source that was removed or deleted.
+  useEffect(() => {
+    if (!store) return;
+    const active = activeDocuments(store);
+    if (active.length === 0) {
+      if (activeDocId !== "") setActiveDocId("");
+      return;
+    }
+    if (!active.some((doc) => doc.docId === activeDocId)) setActiveDocId(active[0].docId);
+  }, [store, activeDocId]);
+
   const replayDemo = useCallback(
     (message: string) => {
       clearTimers();
@@ -211,6 +222,10 @@ function App() {
     setSourcesOpen(false);
   }, []);
 
+  const jumpToSource = useCallback((docId: string, spanId: string) => {
+    setActiveDocId(docId);
+    setSelectedSpanId(spanId);
+  }, []);
 
   const graph = useMemo(
     () => (store ? buildGraph(store) : { nodes: [], links: [] }),
@@ -300,7 +315,8 @@ function App() {
         <button
           className="btn btn-primary"
           type="submit"
-          disabled={loading || !question.trim()}
+          disabled={loading || !question.trim() || activeDocs.length === 0}
+          title={activeDocs.length === 0 ? "Import a document or reset the demo data first" : undefined}
         >
           {loading ? "Tracing…" : "Ask the archive"}
         </button>
@@ -348,6 +364,9 @@ function App() {
           onSelectDoc={setActiveDocId}
           onSelectSpan={setSelectedSpanId}
           onSave={saveDocument}
+          onImportFiles={importFiles}
+          onResetDemoData={resetSources}
+          importing={importing}
         />
 
         <ProofPane
@@ -359,6 +378,7 @@ function App() {
           hop={hop}
           selectedSpanId={selectedSpanId}
           onSelectSpan={setSelectedSpanId}
+          onJumpToSource={jumpToSource}
         />
 
           <SpanBridges answer={answer} visibleSpanIds={visibleSpanIds} />
