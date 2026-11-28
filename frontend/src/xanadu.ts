@@ -16,6 +16,10 @@ export interface DocumentRecord {
   title: string;
   latestVersion: number;
   createdAt: string;
+  /** "removed" = soft-removed: kept in the store, hidden from graph/reader//ask. */
+  status: "active" | "removed";
+  /** "Use in questions" checkbox: excluded docs stay visible but are not sent to /ask. */
+  useInQuestions: boolean;
 }
 
 export interface DocumentVersion {
@@ -92,6 +96,8 @@ export interface GraphNode {
   id: string;
   label: string;
   version: number;
+  /** Excluded from questions: drawn dimmed instead of hidden. */
+  dimmed?: boolean;
 }
 
 export interface GraphLink {
@@ -266,6 +272,8 @@ export function createSeedStore(hashes: Record<string, string>): XanaduStore {
       title: d.title,
       latestVersion: 1,
       createdAt: SEED_CREATED_AT,
+      status: "active",
+      useInQuestions: true,
     })),
     documentVersions: SEED_DOCS.map((d) => ({
       docVersionId: `${d.docId}@v1`,
@@ -279,6 +287,19 @@ export function createSeedStore(hashes: Record<string, string>): XanaduStore {
     spanLinks: SEED_LINKS,
     aiAnswers: [DEMO_ANSWER],
   };
+}
+
+/** Fill in fields added after a store was first persisted (status/useInQuestions). */
+function normalizeStore(store: XanaduStore): XanaduStore {
+  let changed = false;
+  const documents = store.documents.map((doc) => {
+    const status = doc.status === "removed" ? "removed" : "active";
+    const useInQuestions = doc.useInQuestions !== false;
+    if (doc.status === status && doc.useInQuestions === useInQuestions) return doc;
+    changed = true;
+    return { ...doc, status, useInQuestions } as DocumentRecord;
+  });
+  return changed ? { ...store, documents } : store;
 }
 
 function isStore(value: unknown): value is XanaduStore {
@@ -298,7 +319,7 @@ function readStore(): XanaduStore | null {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed: unknown = JSON.parse(raw);
-    return isStore(parsed) ? parsed : null;
+    return isStore(parsed) ? normalizeStore(parsed) : null;
   } catch {
     return null;
   }
@@ -341,6 +362,93 @@ export function getVersionsForDoc(store: XanaduStore, docId: string): DocumentVe
   return store.documentVersions
     .filter((v) => v.docId === docId)
     .sort((a, b) => a.version - b.version);
+}
+
+/* -------------------------------------------------------- source status */
+
+export type SourceAvailability = "active" | "removed" | "deleted";
+
+export function activeDocuments(store: XanaduStore): DocumentRecord[] {
+  return store.documents.filter((doc) => doc.status !== "removed");
+}
+
+/** A document that still exists and has not been soft-removed. */
+export function isDocActive(store: XanaduStore, docId: string): boolean {
+  const doc = store.documents.find((d) => d.docId === docId);
+  return !!doc && doc.status !== "removed";
+}
+
+/** "deleted" = the record is gone; "removed" = soft-removed but restorable. */
+export function sourceAvailability(store: XanaduStore, docId: string): SourceAvailability {
+  const doc = store.documents.find((d) => d.docId === docId);
+  if (!doc) return "deleted";
+  return doc.status === "removed" ? "removed" : "active";
+}
+
+export function docIdForVersion(store: XanaduStore, docVersionId: string): string | null {
+  return store.documentVersions.find((v) => v.docVersionId === docVersionId)?.docId ?? null;
+}
+
+/** Soft remove / restore. No version is touched. */
+export function setDocStatus(
+  store: XanaduStore,
+  docId: string,
+  status: DocumentRecord["status"],
+): XanaduStore {
+  const updated: XanaduStore = {
+    ...store,
+    documents: store.documents.map((doc) => (doc.docId === docId ? { ...doc, status } : doc)),
+  };
+  saveStore(updated);
+  return updated;
+}
+
+export function setDocUseInQuestions(
+  store: XanaduStore,
+  docId: string,
+  useInQuestions: boolean,
+): XanaduStore {
+  const updated: XanaduStore = {
+    ...store,
+    documents: store.documents.map((doc) =>
+      doc.docId === docId ? { ...doc, useInQuestions } : doc,
+    ),
+  };
+  saveStore(updated);
+  return updated;
+}
+
+/**
+ * The one user-confirmed exception to append-only history (AGENTS.md §1.1):
+ * erase a document, every version of it, and every link touching it.
+ * Saved answers are kept so their claims can show "Source deleted".
+ */
+export function deleteDocumentPermanently(store: XanaduStore, docId: string): XanaduStore {
+  const updated: XanaduStore = {
+    ...store,
+    documents: store.documents.filter((doc) => doc.docId !== docId),
+    documentVersions: store.documentVersions.filter((version) => version.docId !== docId),
+    spanLinks: store.spanLinks.filter((link) => {
+      const fromDocId = docIdForVersion(store, link.fromDocVersionId);
+      const toDocId = docIdForVersion(store, link.toDocVersionId);
+      return fromDocId !== docId && toDocId !== docId;
+    }),
+  };
+  saveStore(updated);
+  return updated;
+}
+
+/** Restore the 5 seed documents and their links. Saved answers are kept. */
+export async function resetDemoData(store: XanaduStore): Promise<XanaduStore> {
+  const hashes: Record<string, string> = {};
+  for (const doc of SEED_DOCS) hashes[doc.docId] = await sha256Hex(doc.content);
+  const seeded = createSeedStore(hashes);
+  const updated: XanaduStore = {
+    ...seeded,
+    aiAnswers: store.aiAnswers.length > 0 ? store.aiAnswers : seeded.aiAnswers,
+  };
+  saveStore(updated);
+  return updated;
 }
 
 /** APPEND a new version. History is never mutated or removed. */
@@ -502,7 +610,10 @@ export async function importMarkdownFiles(
     const createdAt = new Date().toISOString();
     next = {
       ...next,
-      documents: [...next.documents, { docId, title, latestVersion: 1, createdAt }],
+      documents: [
+        ...next.documents,
+        { docId, title, latestVersion: 1, createdAt, status: "active", useInQuestions: true },
+      ],
       documentVersions: [
         ...next.documentVersions,
         {
@@ -605,6 +716,17 @@ const dmp = new DiffMatchPatch();
  * 3. otherwise the span is mutated → "outdated"
  */
 export function checkSpanStaleness(span: SpanAddress, store: XanaduStore): StaleCheck {
+  if (sourceAvailability(store, span.docId) !== "active") {
+    // A removed or deleted source can no longer verify a claim: count it as outdated.
+    return {
+      stalenessStatus: "outdated",
+      newStart: span.start,
+      newEnd: span.end,
+      currentText: "",
+      reason: "missing",
+    };
+  }
+
   const latest = getLatestVersion(store, span.docId);
   if (!latest) {
     return {
@@ -748,16 +870,20 @@ export function diffSegments(before: string, after: string): DiffSegment[] {
 
 export function buildGraph(store: XanaduStore): GraphData {
   const versionToDoc = new Map(store.documentVersions.map((v) => [v.docVersionId, v.docId]));
-  const nodes: GraphNode[] = store.documents.map((d) => ({
-    id: d.docId,
-    label: d.title,
-    version: d.latestVersion,
-  }));
+  const isActive = (docId: string): boolean => isDocActive(store, docId);
+  const nodes: GraphNode[] = store.documents
+    .filter((d) => d.status !== "removed")
+    .map((d) => ({
+      id: d.docId,
+      label: d.title,
+      version: d.latestVersion,
+      dimmed: d.useInQuestions === false,
+    }));
   const links: GraphLink[] = [];
   for (const link of store.spanLinks) {
     const source = versionToDoc.get(link.fromDocVersionId);
     const target = versionToDoc.get(link.toDocVersionId);
-    if (!source || !target) continue;
+    if (!source || !target || !isActive(source) || !isActive(target)) continue;
     links.push({
       source,
       target,
@@ -799,7 +925,12 @@ function parseChunk(chunk: string): ParsedEvent | null {
 
 /** POST the latest documents + links to /ask and consume the SSE stream. */
 export async function askQuestion({ question, store, onHop, signal }: AskOptions): Promise<AIAnswerRecord> {
-  const documents = store.documents.map((doc) => {
+  // Removed and excluded sources never leave the browser (AGENTS.md /ask contract).
+  const sendable = store.documents.filter(
+    (doc) => doc.status !== "removed" && doc.useInQuestions !== false,
+  );
+  const sendableIds = new Set(sendable.map((doc) => doc.docId));
+  const documents = sendable.map((doc) => {
     const latest = getLatestVersion(store, doc.docId);
     return {
       docId: doc.docId,
@@ -807,6 +938,11 @@ export async function askQuestion({ question, store, onHop, signal }: AskOptions
       version: doc.latestVersion,
       content: latest?.content ?? "",
     };
+  });
+  const links = store.spanLinks.filter((link) => {
+    const fromDocId = docIdForVersion(store, link.fromDocVersionId);
+    const toDocId = docIdForVersion(store, link.toDocVersionId);
+    return !!fromDocId && !!toDocId && sendableIds.has(fromDocId) && sendableIds.has(toDocId);
   });
 
   const timeout = new AbortController();
@@ -818,7 +954,7 @@ export async function askQuestion({ question, store, onHop, signal }: AskOptions
     const response = await fetch(`${API_BASE}/ask`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, documents, links: store.spanLinks }),
+      body: JSON.stringify({ question, documents, links }),
       signal: timeout.signal,
     });
     if (!response.ok || !response.body) {

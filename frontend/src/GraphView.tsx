@@ -85,6 +85,7 @@ export default function GraphView({ graph, activeNodeId, hop, onSelectNode }: Gr
         nodeRelSize={5}
         nodeCanvasObject={(node: any, ctx: CanvasRenderingContext2D, scale: number) => {
           const active = node.id === activeNodeId;
+          const dimmed = !!node.dimmed;
           const radius = active ? 7 : 5;
           if (active) {
             ctx.beginPath();
@@ -99,7 +100,13 @@ export default function GraphView({ graph, activeNodeId, hop, onSelectNode }: Gr
           }
           ctx.beginPath();
           ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
-          ctx.fillStyle = active ? "#7dd3fc" : node.id === hop?.toDocId ? "#a78bfa" : "#4b5c74";
+          ctx.fillStyle = active
+            ? "#7dd3fc"
+            : dimmed
+              ? "#313a49"
+              : node.id === hop?.toDocId
+                ? "#a78bfa"
+                : "#4b5c74";
           ctx.fill();
 
           const label = String(node.label ?? node.id);
@@ -107,7 +114,7 @@ export default function GraphView({ graph, activeNodeId, hop, onSelectNode }: Gr
           ctx.font = `${fontSize}px ui-sans-serif, system-ui, sans-serif`;
           ctx.textAlign = "center";
           ctx.textBaseline = "top";
-          ctx.fillStyle = active ? "#dff4ff" : "#8b97ab";
+          ctx.fillStyle = active ? "#dff4ff" : dimmed ? "#5b6577" : "#8b97ab";
           ctx.fillText(label, node.x, node.y + radius + 2);
         }}
         nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => {

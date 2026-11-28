@@ -11,6 +11,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import Xarrow, { useXarrow } from "react-xarrows";
 import {
+  activeDocuments,
   checkSpanStaleness,
   diffSegments,
   getLatestVersion,
@@ -80,6 +81,7 @@ export function ReaderPane({
   onSelectSpan,
   onSave,
 }: ReaderPaneProps) {
+  const activeDocs = useMemo(() => activeDocuments(store), [store]);
   const versions = useMemo(() => getVersionsForDoc(store, activeDocId), [store, activeDocId]);
   const latest = versions[versions.length - 1];
   const [viewVersion, setViewVersion] = useState(latest?.version ?? 1);
@@ -126,20 +128,28 @@ export function ReaderPane({
         <span className="mono muted">{versions.length} immutable version{versions.length === 1 ? "" : "s"}</span>
       </div>
       <div className="pane-body">
-        <div className="doc-list">
-          {store.documents.map((doc) => (
-            <button
-              key={doc.docId}
-              className={`doc-item${doc.docId === activeDocId ? " active" : ""}`}
-              onClick={() => onSelectDoc(doc.docId)}
-            >
-              <span className="t">{doc.title}</span>
-              <span className="m">{doc.docId} · v{doc.latestVersion}</span>
-            </button>
-          ))}
-        </div>
+        {activeDocs.length > 0 && (
+          <>
+            <div className="doc-list">
+              {activeDocs.map((doc) => (
+                <button
+                  key={doc.docId}
+                  className={`doc-item${doc.docId === activeDocId ? " active" : ""}${doc.useInQuestions === false ? " off" : ""}`}
+                  onClick={() => onSelectDoc(doc.docId)}
+                  title={doc.useInQuestions === false ? "Excluded from questions" : undefined}
+                >
+                  <span className="t">{doc.title}</span>
+                  <span className="m">
+                    {doc.docId} · v{doc.latestVersion}
+                    {doc.useInQuestions === false ? " · excluded" : ""}
+                  </span>
+                </button>
+              ))}
+            </div>
 
-        <div className="divider" />
+            <div className="divider" />
+          </>
+        )}
 
         {!viewing ? (
           <div className="empty">Select a document to read it.</div>

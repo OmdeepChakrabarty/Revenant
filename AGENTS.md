@@ -6,7 +6,7 @@
 
 You are helping build a **Project Xanadu-inspired linked document and verifiable AI citation system** for the **Kiroween 2026** hackathon (**Resurrection** category).
 
-1. **Never Overwrite Document History (Immutable I-Space):** the `documentVersions` list in the browser store is strictly APPEND-only. Editing a document MUST append a new version `docId@v{n+1}` with `parentVersionId` and `contentHash` (SHA-256 of the content via `crypto.subtle`). Never mutate or delete a historical version.
+1. **Never Overwrite Document History (Immutable I-Space):** the `documentVersions` list in the browser store is append-only for edits. Editing a document MUST append a new version `docId@v{n+1}` with `parentVersionId` and `contentHash` (SHA-256 of the content via `crypto.subtle`). Never mutate a historical version. The only exception is a user-confirmed **"Delete permanently"** from the Removed list, which erases that document, all its versions and every link touching it.
 2. **Never Copy Quoted Text (Span Addressing):** All quotes, transclusions, and AI citations MUST use the canonical half-open 0-based character address format:
    `{docId}@v{version}:{start}-{end}`
    along with `{exact, prefix, suffix}` (32-char context window) for fallback anchoring.
@@ -48,7 +48,7 @@ xanadu-resurrection/
 Keep backend Pydantic models and frontend TypeScript types **100% identical** (camelCase everywhere). The backend has NO database. All data lives in the browser (`localStorage`, append-only), and the relevant documents and links are sent to `/ask` in the request body.
 
 ### Browser Store Schema (`frontend/src/xanadu.ts`, key `xanadu:v1` in `localStorage`)
-* `documents`: `{ docId, title, latestVersion, createdAt }[]`
+* `documents`: `{ docId, title, latestVersion, createdAt, status: "active" | "removed", useInQuestions: boolean }[]` — `status` defaults to `"active"`; `"removed"` is a soft remove (hidden from graph, Reader and `/ask`, restorable). `useInQuestions: false` excludes a still-active document from `/ask` (dimmed in the graph). Both fields are normalized on read for stores persisted before they existed.
 * `documentVersions` (APPEND-ONLY): `{ docVersionId, docId, version, content, contentHash, parentVersionId, createdAt }[]`
 * `spanLinks`: `{ linkId, linkType, fromDocVersionId, fromStart, fromEnd, toDocVersionId, toStart, toEnd, exactQuote, prefix, suffix }[]`
 * `aiAnswers`: `{ answerId, question, fullText, traversal: { step, fromDocId, toDocId, spanId }[], sentences: AnswerSentenceClaim[], createdAt }[]`

@@ -11,14 +11,20 @@ import GraphView from "./GraphView";
 import { ProofPane, ReaderPane, SpanBridges, buildCitationMap } from "./ReaderAndProof";
 import type { AnswerSource } from "./ReaderAndProof";
 import {
+  activeDocuments,
   askQuestion,
   buildGraph,
+  deleteDocumentPermanently,
   DEMO_ANSWER,
   editDoc,
+  getVersionsForDoc,
   importMarkdownFiles,
   loadOrSeedStore,
   refreshAnswerStaleness,
+  resetDemoData,
   saveAnswer,
+  setDocStatus,
+  setDocUseInQuestions,
 } from "./xanadu";
 import type { AIAnswerRecord, TraversalHop, XanaduStore } from "./xanadu";
 
@@ -42,6 +48,7 @@ function App() {
   const [selectedSpanId, setSelectedSpanId] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [sourcesOpen, setSourcesOpen] = useState(false);
   const timers = useRef<number[]>([]);
 
   const clearTimers = useCallback(() => {
@@ -73,6 +80,13 @@ function App() {
     return () => {
       alive = false;
     };
+  }, []);
+
+  const activeDocs = useMemo(() => (store ? activeDocuments(store) : []), [store]);
+
+  const applyStore = useCallback((next: XanaduStore) => {
+    setStore(next);
+    setAnswer((previous) => (previous ? refreshAnswerStaleness(previous, next) : previous));
   }, []);
 
   const replayDemo = useCallback(
@@ -129,7 +143,7 @@ function App() {
           setNotice("Those files had no text in them — nothing was imported.");
           return;
         }
-        setStore(result.store);
+        applyStore(result.store);
         setActiveDocId(result.importedDocIds[0]);
         const docs = `${result.importedDocIds.length} document${result.importedDocIds.length === 1 ? "" : "s"}`;
         const links = result.linkCount > 0
@@ -142,18 +156,61 @@ function App() {
         setImporting(false);
       }
     },
-    [store],
+    [applyStore, store],
   );
 
   const saveDocument = useCallback(
     async (docId: string, content: string) => {
       if (!store) return;
       const { store: next } = await editDoc(store, docId, content);
-      setStore(next);
-      setAnswer((previous) => (previous ? refreshAnswerStaleness(previous, next) : previous));
+      applyStore(next);
     },
-    [store],
+    [applyStore, store],
   );
+
+  const toggleSourceUse = useCallback(
+    (docId: string, use: boolean) => {
+      if (!store) return;
+      applyStore(setDocUseInQuestions(store, docId, use));
+    },
+    [applyStore, store],
+  );
+
+  const removeSource = useCallback(
+    (docId: string) => {
+      if (!store) return;
+      applyStore(setDocStatus(store, docId, "removed"));
+    },
+    [applyStore, store],
+  );
+
+  const restoreSource = useCallback(
+    (docId: string) => {
+      if (!store) return;
+      applyStore(setDocStatus(store, docId, "active"));
+    },
+    [applyStore, store],
+  );
+
+  const deleteSource = useCallback(
+    (docId: string) => {
+      if (!store) return;
+      applyStore(deleteDocumentPermanently(store, docId));
+    },
+    [applyStore, store],
+  );
+
+  const resetSources = useCallback(async () => {
+    if (!store) return;
+    applyStore(await resetDemoData(store));
+  }, [applyStore, store]);
+
+  const openSource = useCallback((docId: string) => {
+    setActiveDocId(docId);
+    setSelectedSpanId(null);
+    setSourcesOpen(false);
+  }, []);
+
 
   const graph = useMemo(
     () => (store ? buildGraph(store) : { nodes: [], links: [] }),
@@ -196,6 +253,15 @@ function App() {
           <p>Immutable I-Space · span-addressed citations · ghost-claim verification</p>
         </div>
         <div className="topbar-spacer" />
+        <button
+          className="btn btn-sm"
+          onClick={() => setSourcesOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={sourcesOpen}
+          title="Exclude, remove, restore or delete sources"
+        >
+          Sources ({activeDocs.length})
+        </button>
         <label
           className="btn btn-sm import-btn"
           title="Import Markdown files. [[wikilinks]] and ![[embeds]] become span links."
@@ -214,7 +280,7 @@ function App() {
           />
         </label>
         <span className="badge" title="Every edit appends a new immutable version">
-          {store.documents.length} docs · {store.documentVersions.length} versions · {store.spanLinks.length} spans
+          {activeDocs.length} sources · {store.documentVersions.length} versions · {store.spanLinks.length} spans
         </span>
       </header>
 
@@ -231,7 +297,11 @@ function App() {
           placeholder={DEFAULT_QUESTION}
           aria-label="Question"
         />
-        <button className="btn btn-primary" type="submit" disabled={loading || !question.trim()}>
+        <button
+          className="btn btn-primary"
+          type="submit"
+          disabled={loading || !question.trim()}
+        >
           {loading ? "Tracing…" : "Ask the archive"}
         </button>
       </form>
@@ -293,6 +363,211 @@ function App() {
 
           <SpanBridges answer={answer} visibleSpanIds={visibleSpanIds} />
         </Xwrapper>
+      </div>
+
+      {sourcesOpen && (
+        <SourcesPanel
+          store={store}
+          onClose={() => setSourcesOpen(false)}
+          onOpenDoc={openSource}
+          onToggleUse={toggleSourceUse}
+          onRemove={removeSource}
+          onRestore={restoreSource}
+          onDelete={deleteSource}
+          onReset={resetSources}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------ sources */
+
+type SourcesConfirm =
+  | { kind: "delete"; docId: string; title: string; versions: number }
+  | { kind: "reset" }
+  | null;
+
+interface SourcesPanelProps {
+  store: XanaduStore;
+  onClose: () => void;
+  onOpenDoc: (docId: string) => void;
+  onToggleUse: (docId: string, use: boolean) => void;
+  onRemove: (docId: string) => void;
+  onRestore: (docId: string) => void;
+  onDelete: (docId: string) => void;
+  onReset: () => void;
+}
+
+function docSizeKb(store: XanaduStore, docId: string): number {
+  const bytes = getVersionsForDoc(store, docId).reduce(
+    (sum, version) => sum + version.content.length * 2,
+    0,
+  );
+  return Math.max(0.1, Math.round((bytes / 1024) * 10) / 10);
+}
+
+function SourcesPanel({
+  store,
+  onClose,
+  onOpenDoc,
+  onToggleUse,
+  onRemove,
+  onRestore,
+  onDelete,
+  onReset,
+}: SourcesPanelProps) {
+  const [confirm, setConfirm] = useState<SourcesConfirm>(null);
+  const active = store.documents.filter((doc) => doc.status !== "removed");
+  const removed = store.documents.filter((doc) => doc.status === "removed");
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (confirm) setConfirm(null);
+      else onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [confirm, onClose]);
+
+  return (
+    <div className="sources-scrim" role="presentation" onClick={onClose}>
+      <div
+        className="sources-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Sources"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="sources-head">
+          <div>
+            <h2>Sources</h2>
+            <p className="small muted" style={{ margin: 0 }}>
+              {active.length} active · {removed.length} removed
+            </p>
+          </div>
+          <button className="btn btn-sm" onClick={onClose}>
+            Close
+          </button>
+        </div>
+
+        <div className="sources-body">
+          <p className="section-title">Active sources</p>
+          {active.length === 0 ? (
+            <div className="empty">No active sources yet. Import a document or reset the demo data.</div>
+          ) : (
+            active.map((doc) => {
+              const versions = getVersionsForDoc(store, doc.docId).length;
+              const excluded = doc.useInQuestions === false;
+              return (
+                <div key={doc.docId} className={`source-row${excluded ? " off" : ""}`}>
+                  <div className="source-main">
+                    <span className="source-title">{doc.title}</span>
+                    <span className="source-meta">
+                      {versions} version{versions === 1 ? "" : "s"} · {docSizeKb(store, doc.docId)} KB ·{" "}
+                      {excluded ? "excluded from questions" : "active"}
+                    </span>
+                  </div>
+                  <div className="source-actions">
+                    <label className="check" title="Excluded sources are not sent to /ask">
+                      <input
+                        type="checkbox"
+                        checked={!excluded}
+                        onChange={(event) => onToggleUse(doc.docId, event.target.checked)}
+                      />
+                      Use in questions
+                    </label>
+                    <button className="btn btn-sm" onClick={() => onOpenDoc(doc.docId)}>
+                      Open
+                    </button>
+                    <button className="btn btn-sm" onClick={() => onRemove(doc.docId)}>
+                      Remove
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+
+          <p className="section-title" style={{ marginTop: 18 }}>
+            Removed · {removed.length}
+          </p>
+          {removed.length === 0 ? (
+            <p className="small muted" style={{ margin: 0 }}>
+              Nothing removed. Removed sources are hidden from the graph, the Reader and questions, but
+              their history is kept.
+            </p>
+          ) : (
+            removed.map((doc) => {
+              const versions = getVersionsForDoc(store, doc.docId).length;
+              return (
+                <div key={doc.docId} className="source-row removed">
+                  <div className="source-main">
+                    <span className="source-title">{doc.title}</span>
+                    <span className="source-meta">
+                      {versions} version{versions === 1 ? "" : "s"} · {docSizeKb(store, doc.docId)} KB ·
+                      removed
+                    </span>
+                  </div>
+                  <div className="source-actions">
+                    <button className="btn btn-sm" onClick={() => onRestore(doc.docId)}>
+                      Restore
+                    </button>
+                    <button
+                      className="btn btn-sm btn-danger"
+                      onClick={() =>
+                        setConfirm({
+                          kind: "delete",
+                          docId: doc.docId,
+                          title: doc.title,
+                          versions,
+                        })
+                      }
+                    >
+                      Delete permanently
+                    </button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+
+          <div className="divider" />
+          <button className="btn btn-sm" onClick={() => setConfirm({ kind: "reset" })}>
+            Reset demo data
+          </button>
+        </div>
+
+        {confirm && (
+          <div className="confirm-layer">
+            <div className="confirm-box" role="alertdialog" aria-modal="true" aria-label="Confirm">
+              <p className="confirm-title">
+                {confirm.kind === "delete" ? "Delete source permanently?" : "Reset demo data?"}
+              </p>
+              <p className="small muted" style={{ marginTop: 0 }}>
+                {confirm.kind === "delete"
+                  ? `“${confirm.title}”, its ${confirm.versions} version${confirm.versions === 1 ? "" : "s"} and every link touching it will be erased. Saved answers keep their quote text but will report “Source deleted”.`
+                  : "The archive returns to the 5 seed documents and their links. Imported documents are dropped. Saved answers are kept."}
+              </p>
+              <div className="confirm-actions">
+                <button className="btn btn-sm" onClick={() => setConfirm(null)}>
+                  Cancel
+                </button>
+                <button
+                  className="btn btn-sm btn-danger"
+                  onClick={() => {
+                    if (confirm.kind === "delete") onDelete(confirm.docId);
+                    else void onReset();
+                    setConfirm(null);
+                  }}
+                >
+                  {confirm.kind === "delete" ? "Delete permanently" : "Reset demo data"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
